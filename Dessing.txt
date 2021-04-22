@@ -26,9 +26,9 @@ To generate a tree, we will define the object "node" containing:
 { 
 
 · An id, unique to all nodes in a tree
-·An array of length max_char - min_char of pointers to a node of the same tree
-·A pointer to a shared array<uint>, which counts the amount of each char found in the matched string
-·A pointer to a shared array<uint>, which will be used to store data to be used by the tree matcher
+· An array of length max_char - min_char of pointers to a node of the same tree
+· A pointer to a shared array<uint>, which counts the amount of each char found in the matched string
+· A pointer to a shared array<uint>, which will be used to store data to be used by the tree matcher
 
 }
 
@@ -64,7 +64,7 @@ Most basically, we will define functions and their behaviour, in a list of all n
 Append one char to node ->
   · If the char is empty, create a new node
   · If the char is set ->
-      · If the node has > 1 nodes that link to it, duplicate its references into a new node, and move to it
+      · If the node has > 1 char that link to it, duplicate its references into a new node, and move to it
       · Otherwise, do nothing
 
 
