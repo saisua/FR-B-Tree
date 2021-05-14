@@ -513,9 +513,9 @@ class Mreg{
 							pos_val < last; pos_val++, data_ptr++){
 			if(data_ptr != nullptr){
 				#if VERBOSE
-				printf("%c{%u}, ", pos_val, ((Mreg*)data_ptr)->id);
+				printf("%c{%u}, ", pos_val, ((Mreg*)*data_ptr)->id);
 				#endif
-				new_arr->data[pos_val] = (void*) data_ptr;
+				new_arr->data[pos_val] = (void*) *data_ptr;
 				new_arr->length++;
 			}
 		}
@@ -586,24 +586,24 @@ int main(int argc, char *argv[])
 {
 
 	// add to be matched
-	std::string add[] = {"hola\\s", "hombr\\w", "hombr\\ws", 
-						"adios", //, "adioses", "\\d",
-						//"hola\\.", "[Gg]uap[oae]",
-						//"[a-z1b]@", "\\..\\.", 
-						"a\\db"
+	std::string add[] = {"hola\\s", "hombr\\ws", "hombr\\w", 
+						"adios", "adioses", "\\d",
+						"hola\\.", "[Gg]uap[oae]",
+						"[a-z1b]@", "\\..\\.", "a\\db"
 						};
 
 	// to be checked if they match (not all must match)
 	std::vector<std::string> match {"hombros", "adios", "hombree", 
-						"hombro", "hombres", "hola ", "a1b"
-						//"hola.", "dios", "", "1",
-						//"Guapa", "guape", "guapi",
-						//"r@", "1@", "R@", "2@",
-						//".h.", ".@."
+						"hombro", "hombres", "hola ", "a1b",
+						"hola.", "dios", "", "1",
+						"Guapa", "guape", "guapi",
+						"r@", "1@", "R@", "2@",
+						".h.", ".@."
 						};
-	std::vector<uint> id {1, 4, 0, 3, 1, 2, 5, 
-						7, 0, 0, 6, 8, 8, 0, 9, 9, 0, 0, 10, 10
-						};
+	std::vector<uint> id {2, 4, 0, 3, 2,
+						1, 11, 7, 0, 0, 
+						6, 8, 8, 0, 9, 
+						9, 0, 0, 10, 10};
 	
 	uint ua = 0;
 	uint ub = 0;
