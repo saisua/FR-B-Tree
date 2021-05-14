@@ -1,0 +1,149 @@
+Fuzzy Regex B-Tree Data Structure (FR B-Tree)
+
+
+Generate a data structure for O(n) string matching with regex functionalities and optional fuzzy search.
+
+Although it has not been tested, appending new matching strings should be possible for fuzzy and non-fuzzy matching. It however can be rather slow during the update of the tree, but matching performance should not be affected.
+
+
+Terms:
+
+· Fuzzy search: string matching where small changes (errors) in the sentence match a defined, correct string. Pex. Trousers = Throusers = Tousers = Ttoursers.
+
+· Fuzzy search distance d: The amount of changes allowed for any string to still match the correct string.
+
+· Fuzzy search error err: In the algorithm, it counts the number of steps any string has taken intentionally to account for it. This errors are in the range of {Insertion, Deletion, Substitution} of any char in the string.
+
+· Fuzzy search string Fss: All the base (correct) strings the algorithm takes as an argument, to generate the variations.
+
+· Fuzzy search generated string Fgs: All the generated strings, from the Fss, of err <= d.
+
+· Regex: Using of regular expressions, which allow easily designed broad string matching capabilities. Pex. \d+ match all numbers from 0 to infinity.
+
+· Regex expression: A string containing the instructions  and ruled to generate the marcher.
+
+· B-Tree: A data structure, based on a tree of arrays, where any character matches the position of its numerical decimal value.
+
+· Charset: A list of unique characters
+
+
+· max_char, min_char: Respectively, the allowed char highest and lowest numerical values.
+
+
+To generate a tree, we will define the object "node" containing: 
+{ 
+  An id, unique to all nodes in a tree
+  An array of length max_char - min_char of pointers to a node of the same tree
+  A pointer to a shared array<uint>, which counts the amount of each char found in the matched string
+  A pointer to a shared array<uint>, which will be used to store data to be used by the tree matcher
+}
+
+
+Using these objects node, we will store a root object, empty, and start filling it up with strings, iterating over them.
+We define several cases the algorithm must be prepared for, noted with Regex syntax, and a variable x, containing any single-letter string, or [x] if it is a charset.
+
+
+axa
+ax?a
+ax+a
+ax*a
+ax{2}a
+ax{2,4}a
+a[x]a
+s[2-4]
+aa{2}a
+
+
+First of all, we have described x as a "string" or "charset", meaning x can have multiple different characters accepted in the same position (pex. \d means any single-digit number { 0 to 9 }, \d\d { 00 to 99 }...)
+And so, we have to detect these cases.
+To do so linearly, we use a bool var, which detects any '\' character, that, when followed by anything other than '\', will treat that char as special. Because of that, we will have to convert all \d to a list of { 0 to 9 } and so.
+
+In our algorithm, we use a switch as a way to reference special char that has other uses than matching, to induce special behaviours that allow other functionalities needed to allow Regex, and recursive statements.
+
+
+Once detetcted the special case, we work out the details.
+
+Most basically, we will define functions and their behaviour, in a list of all nodes being worked on.
+
+Append one char to node ->
+  · If the char is empty, create a new node
+  · If the char is set ->
+    · If the node has > 1 nodes that link to it, duplicate its references into a new node, and move to it
+    · Otherwise, do nothing
+
+
+Append a charset to node (per char) 
+
+Generate a new node, to which all char of the charset converge
+  ->
+  · If the char is empty, fill with the pointer to the new node.
+  · If the char is set, do nothing
+
+
+If the char is empty, and the number of node being worked on is not the first one, point to it, and remove this variation from the list.
+
+The appliance of any charset [x] could be solved by adding all char to the same node.
+The appliance of conditional and repetition matching could be done by, being start_node the last non-affected node, and end_node the last node affected (Pex. co(br)?a matches { coa, cobra }), the node before end_node points to a copy of start_node if '?' or '+', and to start_node itself if '*'.
+The appliance of {2}, {2,4}... could be easily done by the difference of seen characters before the group, and after.
+
+This should allow us to apply any multi-regex function, on a B-tree.
+
+
+
+Fuzzy search:
+
+Fuzzy search is the ability of an algorithm to detect a misspelled before-known word, expression, sentence or match. This basis will be translated into an algorithm to allow some amount of mispells for the matches, while keeping all regex functionalities, and its O(n) time complexity, and its memory as O((d+1)*n) being n the spatial complexity of the original with no fuzzy search.
+
+To apply fuzzy search to such a data structure, we need to define the distance d as the amount of modifications of { Insertion, Subtraction, Substitution } of any correct string Fss.
+
+In short, we will apply "variation paths" by generating and adding new generated strings Fgs to a new one-directional branch of the tree (new dimension as I like to visualize the tree, where the new dimension represents the error), where every wrong-taken path will get us closer to the no-more-errors-allowed branch ( b | err(b) = 0 )
+
+We will define the error err of a Fgs as the amount of wrong paths it is allowed to take.
+
+We will need to keep in memory ??? pointers to a node, and apply this an algorithm to each node, first defining a helper function:
+merge(n1 > n2) { copy = clone(n2); copy.replaceWith(n1); }
+
+Being in a node Ni,e, where i is the depth of the node, and e >= 0, e0 = d:
+· If char is set, do nothing
+· If char is empty, and e > 0 ->
+  · Ni-1,e-1 = merge(Ni,e > Ni-1,e)
+
+
+
+Memory optimization:
+
+For improving on memory, and once the tree has been fed all matching strings, we will compute over all possible substrings, and overlap those nodes that can be overlapped.
+
+P.ex
+Hi, good morning
+Hello, good night
+         ↓
+  i            morning
+H      , good 
+  ello         night
+
+(We reduced the need of 7 nodes in just one collision)
+
+
+We wil define a substring of a matching string in the tree Subs as the list of ordered characters of length > 1 that overlap but don't overlap all the way to the end. Also, we will ignore substrings of existing substrings.
+
+Being Fss all matching strings:
+x ∈ Subs ⇔ ( x ∈ W1 ∈ Fss, y ∈ W2 ∈ Fss, x = y, x+x' ∈ Suffix(W1), y+y' ∈ Suffix(W2), x' ≠ y' )
+∄ u ∈ Subs, v ∈ Subs | v ∈ u
+
+
+We will also order the Subs based on a metric we call Use. The Use will be defined as the product of the number of letters |x| times the amount of words it is in t.
+Use = |x| * t
+
+Having computed and ordered the list Subs, we will iterate over all the substrings, removing overlapping nodes, and creating new branches at the end
+
+It is important none of these substrings overlap all the way to the end, because all of them must branch away to arrive to their unique id. If one of them overlapped all the way to the last node, there would need to be two uid defined to that last node, which must not be allowed.
+
+
+
+Performance optimization:
+
+Finally, if speed is really necessary, we generate a copy of the tree, but with arrays of pointers to other arrays, and a separated counter+data vector of size > max_char - min_char. This should remove the amount of changes between objects we make, and allow us to reuse more cache and cpu registers.
+
+Also, we might be able to concatenate arrays, not to jump between the nodes. This could be a performance improvement although it would depend on the case, and it would be necessary to add another comparison per node, which I'm not sure is the most efficient
+Concatenate arrays into one, if two arrays are simple, do not change the active object, only add to the pointer max_char bytes
