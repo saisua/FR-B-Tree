@@ -600,6 +600,8 @@ int main(int argc, char *argv[])
 						"r@", "1@", "R@", "2@",
 						".h.", ".@."
 						};
+
+	// Ids start by 1 from the add array, since id=0 means no match
 	std::vector<uint> id {2, 4, 0, 3, 2,
 						1, 11, 7, 0, 0, 
 						6, 8, 8, 0, 9, 
