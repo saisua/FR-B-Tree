@@ -1,0 +1,6 @@
+*.out*
+*.txt
+mreg
+*.tree
+
+.vscode/*

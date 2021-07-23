@@ -17,12 +17,18 @@
 #include <list>
 #include <queue>
 #include <fstream>
+#include <sys/resource.h>
+#include <cstring>
 
 #define VERBOSE false
 #define CLEAN false
+#define PROFILE true
+
 #define GENERATE false
 #define STORE true
 #define MATCH true
+// Only match and do not process groups
+#define PLAIN_MATCH false
 
 
 // The final id of the match. 0 if the node is not final
@@ -49,13 +55,21 @@
 // The maximum length of a regex expression
 #define MAX_LENGTH 2
 
+// The number to look for when looking for
+// capture nodes
+#define CAPTURE_NODE -1
+
 #define group_t std::unordered_set
 #define capture_t std::list
 
-#define first_char  32
+// First char is not 7, but this way
+// we can save on some cycles,
+// since we don't have to "remap"
+// chars. First char is actually 32
+#define first_char  7
 #define last_char 127
 #define control_positions 7
-#define reserved_data_size 16384
+#define reserved_data_size 2^15
 
 #define char_offset (control_positions - first_char)
 
@@ -70,47 +84,24 @@
 #define reg_s std::string({' ',reg_n,reg_t})
 #define reg_dot reg_w+reg_s+std::string("!@#$%^&*()_+{}[]'\\|\"/-=>?<ºª`~")
 
-inline bool fnull(uint p){ return p != 0; }
+consteval inline bool fnull(uint p){ return p != 0; }
 inline bool is_regex(const char* expr){
 	return *(expr-1) == '\\' && !(*(expr-1) == '\\' && ! isalpha(*expr));
-}
-inline uint count_sorted(const uint* expr, uint value){
-	uint result = 0;
-	while(*expr){
-		if(*expr == value){
-			++result;
-			++expr;
-			break;
-		}
-		++expr;
-	}
-
-	if(!result) return 0;
-
-	while(*expr == value){
-		++result;
-		++expr;
-	}
-
-	return result;
 }
 
 // TODO: Change all pointers to proper C++ ptr
 class Mreg{
 	private:
-		// Maybe turn into vector<vector<array<2, int>>> ?
-		// vector [match]
-		// vector [capture]
-		// array [id, char*] (id < 0 means capture end)
-		std::vector<std::vector<std::array<intptr_t,2>>> _capture_groups = 
-								std::vector<std::vector<std::array<intptr_t,2>>>{
-									std::vector<std::array<intptr_t,2>>()
-								};
-		std::vector<std::vector<const char*>> match_groups = std::vector<std::vector<const char*>>();
-		std::vector<std::vector<bool>> match_endings = std::vector<std::vector<bool>>();
+		// Take note of which pointers have been deleted
+		std::unordered_set<intptr_t> deleted {};
+		std::list<capture_t<long int>*> unknown_ptrs;
+		
+		std::vector<bool> contains_captures;
+		std::vector<intptr_t> nodes_captures;
+		std::vector<const char*> str_captures;
+		std::vector<const char*> str_starts;
 
-		std::vector<uint> nodes_captures = std::vector<uint>();
-		std::vector<const char*> str_captures = std::vector<const char*>();
+		std::unordered_set<intptr_t> nodes_data_captures;
 
 		std::queue<uint8_t> capture = std::queue<uint8_t>();
 		// Also, I could turn CAPTURES to int and add the ids only.
@@ -132,8 +123,109 @@ class Mreg{
 	Mreg() {
 		this->data = std::vector<intptr_t>(char_length*2, 0);
 		this->data.reserve(reserved_data_size);
+
+		this->contains_captures = std::vector<bool> ();
+		this->nodes_captures = std::vector<intptr_t>();
+		this->str_captures = std::vector<const char*>();
+		this->str_starts = std::vector<const char*>();
+		this->unknown_ptrs = std::list<capture_t<long int>*>();
+
+		nodes_data_captures = std::unordered_set<intptr_t>();
+
+
+		this->contains_captures.push_back(false);
 	}
 
+	~Mreg(){
+		//this->delete_pointers();
+		this->data.resize(0);
+	}
+
+	void delete_pointers(bool all = false){
+		const size_t max_size = this->data.size();
+	
+		#if VERBOSE
+		printf("\n\n### DELETING\n\t");
+		
+		constexpr uint max = 5;
+		uint count = 0;
+		#endif
+
+		for(uint node = char_length; node != max_size; node += char_length){
+			if(this->nodes_data_captures.count(node))
+				continue;
+
+			#if VERBOSE
+			printf(" %u", node);
+			#endif
+
+			if(this->data[node+GROUP]){
+				#if VERBOSE
+				printf("-G", this->data[node+GROUP]);
+				#endif
+				if(! this->deleted.count(this->data[node+GROUP])){
+					#if VERBOSE
+					printf("#");
+					
+					#endif
+
+					this->deleted.insert(this->data[node+GROUP]);
+
+					delete reinterpret_cast<group_t<uint>*>(this->data[node+GROUP]);
+				}
+				this->data[node+GROUP] = 0;
+			}
+			
+			#if !PLAIN_MATCH
+			if(all)
+			#endif
+			if(this->data[node+CAPTURES]){
+				#if VERBOSE
+				printf("-C");
+				#endif
+				if(! this->deleted.count(this->data[node+CAPTURES])){
+					#if VERBOSE
+					printf("#");
+					#endif
+					this->deleted.insert(this->data[node+CAPTURES]);
+
+					delete reinterpret_cast<capture_t<long int>*>(this->data[node+CAPTURES]);
+				}
+				// Used in match to detect nodes with possible
+				// captures
+				#if PLAIN_MATCH
+				this->data[node+CAPTURES] = 0;
+				#endif
+			}
+
+			#if VERBOSE
+			if(count != max)
+				++count;
+			else{
+				count = 0;
+				printf("\r%c[2K\r\t", 27);
+			}
+			#endif
+		}
+
+		// For all pointers in this->unknown_ptrs, check if they are
+		// in this->deleted. If they are not in this->deleted,
+		// delete the pointer.
+		for(std::list<capture_t<long int>*>::iterator it = this->unknown_ptrs.begin(); it != this->unknown_ptrs.end(); ++it){
+			intptr_t ptr = reinterpret_cast<intptr_t>(*it);
+			if(this->deleted.count(ptr))
+				continue;
+			
+			delete *it;
+
+			this->deleted.insert(ptr);
+		}
+		this->unknown_ptrs.clear();
+
+		#if VERBOSE
+		printf("\n###\n\n");
+		#endif
+	}
 
 	std::string str(const uint node=char_length){
 		std::string result = "[";
@@ -168,6 +260,11 @@ class Mreg{
 	}
   
   	void append(const char* expression){
+		// Delete any invalid pointers from
+		// last append
+		this->delete_pointers();
+
+
 		// Any char after a backslash
 		bool backslash = false;
 
@@ -176,24 +273,27 @@ class Mreg{
 
 		uint node = char_length;
 
-		this->_capture_groups.push_back(std::vector<std::array<intptr_t,2>>());
-
 		// Calculate expression length
 		uint expression_length = 100;
 		if(expression_length > this->max_str_size){
 			this->max_str_size = expression_length;
 
-			this->nodes_captures.reserve(expression_length*this->added_id);
-			this->str_captures.reserve(expression_length*this->added_id);
+			//this->nodes_captures.reserve(expression_length*this->added_id*2);
+			//this->str_captures.reserve(expression_length*this->added_id*2);
+			//this->str_starts.reserve(expression_length*this->added_id*2);
 
 			this->data[MAX_LENGTH] = expression_length;
 		}
+		this->contains_captures.push_back(false);
 
 		while(*expression){
 			switch (*expression){
 				// char '('
 				case '(': 
 					if(! backslash){
+						#if VERBOSE
+						printf("Detected capture to be opened\n");
+						#endif
 						this->capture.push(1);
 						break;
 					}
@@ -201,6 +301,9 @@ class Mreg{
 				// char ')'
 				case ')': 
 					if(! backslash){
+						#if VERBOSE
+						printf("Detected capture to be closed\n");
+						#endif
 						this->capture.push(2);
 						break;
 					}
@@ -283,6 +386,12 @@ class Mreg{
 					// If it's an or, 
 					if(! backslash){
 						if(this->data[node+GROUP_ID] != this->added_id){
+							if(this->data[node+GROUP]){
+								this->deleted.insert(this->data[node+GROUP]);
+
+								delete reinterpret_cast<group_t<uint>*>(this->data[node+GROUP]);
+							}
+							
 							uint next = node;
 							node = last_nodes.top();
 							
@@ -349,7 +458,7 @@ class Mreg{
 			#if VERBOSE
 				printf("Detected final multi-regex node %u of length %u\n", node, group->size());
 			#endif
-			for(group_t<uint>::iterator n = group->begin(); n != group->end(); ++n){
+			for(group_t<uint>::const_iterator n = group->cbegin(); n != group->end(); ++n){
 				this->data[(*n)+FINAL] = this->added_id;
 				
 				#if VERBOSE
@@ -365,7 +474,7 @@ class Mreg{
 		}
 
 
-		for(size_t cap = this->capture.size(); cap > 0; --cap){
+		for(size_t cap = this->capture.size(); cap; --cap){
 			if(this->capture.back() == 2)
 				this->end_group(node);
 
@@ -375,17 +484,6 @@ class Mreg{
 		#if VERBOSE
 			printf("Added new expression in node %u {%u}\n", node, this->added_id);
 		#endif
-
-		//
-		std::vector<const char*> gr = std::vector<const char*>();
-		std::vector<bool> endings = std::vector<bool>();
-
-		gr.reserve(this->_capture_groups[this->added_id].capacity());
-		endings.reserve(this->_capture_groups[this->added_id].capacity());
-
-		this->match_groups.push_back(gr);
-		this->match_endings.push_back(endings);
-		//
 
 		++this->data[NUM_ADDED];
 		++this->added_id;
@@ -410,7 +508,7 @@ class Mreg{
 				#if VERBOSE
 					printf("Detected post multi-regex node %u of length %i\n", node, group->size());
 				#endif
-				for(group_t<uint>::iterator n = group->begin(); n != group->end(); ++n){
+				for(group_t<uint>::const_iterator n = group->cbegin(); n != group->end(); ++n){
 					this->data[*n+*expr+char_offset] = result;
 					#if VERBOSE
 					printf(" %u -> %u\n", (*n), result);
@@ -454,6 +552,38 @@ class Mreg{
 					&& this->data[lett+LINKS] > 1){
 			return this->copy(node, *expr);
 		}
+		else{
+			capture_t<long int>* capture_merge = new capture_t<long int>();
+
+			// Cast lett+CAPTURE and node+CAPTURE to capture_t<long int>*, and merge
+			// them into capture_merge.
+			capture_t<long int>* merged_capture;
+			
+			if(this->data[node+CAPTURES]){
+				merged_capture = reinterpret_cast<capture_t<long int>*>(this->data[node+CAPTURES]);
+
+				if(!this->deleted.count(this->data[node+CAPTURES]))
+					capture_merge->insert(capture_merge->end(), merged_capture->begin(), merged_capture->end());
+			}
+			if(this->data[node+CAPTURES]){
+				merged_capture = reinterpret_cast<capture_t<long int>*>(this->data[lett+CAPTURES]);
+
+				if(!this->deleted.count(this->data[node+CAPTURES]))
+					capture_merge->insert(capture_merge->end(), merged_capture->begin(), merged_capture->end());
+			
+				if(this->data[lett+LINKS] == 1)
+					delete merged_capture;
+				else
+					// Add capture to unknown_ptrs
+					this->unknown_ptrs.push_back(merged_capture);
+			}
+
+			if(capture_merge->size())
+				this->data[lett+CAPTURES] = reinterpret_cast<intptr_t>(capture_merge);
+			else
+				delete capture_merge;
+		}
+
 		#if VERBOSE
 		printf("%u -> %u\n", node, lett);
 		#endif
@@ -549,12 +679,15 @@ class Mreg{
 		}
 
 		// If any of the letters did not exist, we add the common node
-		if(this->data[seen_reg+LINKS] > 0){
+		if(this->data[seen_reg+LINKS]){
 			this->data[seen_reg+GROUP_ID] = this->added_id;
 			this->data[seen_reg+GROUP] = reinterpret_cast<intptr_t>(group);
 			this->data[seen_reg+NEXT] = new_arr;
+			this->data[seen_reg+CAPTURES] = this->data[node+CAPTURES];
 			
 			group->insert(seen_reg);
+
+			this->check_capture(seen_reg);
 
 			#if VERBOSE
 			printf("Shared node has %i links\n", this->data[seen_reg+LINKS]);
@@ -562,6 +695,8 @@ class Mreg{
 
 			return seen_reg;
 		}
+
+		this->check_capture(new_reg);
 
 		return new_reg;
 	}
@@ -712,7 +847,7 @@ class Mreg{
 					node = this->append_letter(node, (std::string(min, letter)+**expr).c_str());
 
 				// Add the max-min remaining nodes with exits at any point to the same node
-				for(; diff > 0; --diff){
+				for(; diff; --diff){
 					node = this->append_letter(node, (std::string(diff, letter)+**expr).c_str());
 					
 					group->insert(node);
@@ -745,7 +880,7 @@ class Mreg{
 				// been added
 				max -= 1;
 
-				for(; max > 0; --max)
+				for(; max; --max)
 					node = this->append_letter(node, (std::string(max, letter)+**expr).c_str());
 			}
 
@@ -768,7 +903,7 @@ class Mreg{
 		else {
 			group = reinterpret_cast<group_t<uint>*>(this->data[node+GROUP]);
 
-			for(group_t<uint>::iterator n = group->begin(); n != group->end(); ++n){
+			for(group_t<uint>::const_iterator n = group->cbegin(); n != group->end(); ++n){
 				this->data[*n+NEXT] = next;
 			}
 		}
@@ -776,14 +911,17 @@ class Mreg{
 		// Add the last non-optional to the group
 		if (this->data[last+GROUP_ID] == this->added_id && this->data[last+GROUP]){
 			last_group = reinterpret_cast<group_t<uint>*>(this->data[last+GROUP]);
+			this->deleted.insert(this->data[last+GROUP]);
 
-			for(group_t<uint>::iterator n = last_group->begin(); n != last_group->end(); ++n){
+			for(group_t<uint>::const_iterator n = last_group->cbegin(); n != last_group->end(); ++n){
 				group->insert(*n);
 
 				this->data[*n+NEXT] = next;
 				this->data[*n+GROUP_ID] = this->added_id;
 				this->data[*n+GROUP] = reinterpret_cast<intptr_t>(group);
 			}
+
+			delete last_group;
 		} else {
 			group->insert(last);
 			
@@ -826,20 +964,23 @@ class Mreg{
 			plus_1 = this->append_letter(node, expr, plus_1);
 			this->append_letter_no_exist(plus_1, expr, plus_1);
 
-			g_plus = new std::unordered_set<uint>{plus_1};
+			g_plus = new group_t<uint>{plus_1};
 			this->data[plus_1+GROUP] = reinterpret_cast<intptr_t>(g_plus);
 			this->data[plus_1+GROUP_ID] = this->added_id;
 		}
 
 		if(this->data[node+GROUP_ID] == this->added_id && this->data[node+GROUP]){
 			group_t<uint>* g_node = reinterpret_cast<group_t<uint>*>(this->data[node+GROUP]);
+			this->deleted.insert(this->data[node+GROUP]);
 		
-			for(group_t<uint>::iterator n = g_node->begin(); n != g_node->end(); ++n){
+			for(group_t<uint>::const_iterator n = g_node->cbegin(); n != g_node->end(); ++n){
 				g_plus->insert(*n);
 
 				this->data[*n+GROUP] = reinterpret_cast<intptr_t>(g_plus);
 				this->data[*n+GROUP_ID] = this->added_id;
 			}
+
+			delete g_node;
 		} else {
 			g_plus->insert(node);
 			this->data[node+GROUP] = reinterpret_cast<intptr_t>(g_plus);
@@ -870,11 +1011,15 @@ class Mreg{
 		
 		this->data[node+pos+char_offset] = new_arr;
 
-		for(size_t cap = this->capture.size(); cap > 0; --cap){
+		this->check_capture(new_arr);
+	}
+
+	void check_capture(const uint node){
+		for(size_t cap = this->capture.size(); cap; --cap){
 			if(this->capture.back() == 1)
-				this->start_group(new_arr);
+				this->start_group(node);
 			else
-				this->end_group(new_arr);
+				this->end_group(node);
 
 			this->capture.pop();
 		}
@@ -939,7 +1084,7 @@ class Mreg{
 	inline void start_group(const uint node){
 		if(!this->data[node+CAPTURES]){
 				this->data[node+CAPTURES] = reinterpret_cast<intptr_t>(
-											new capture_t<long int>()
+												new capture_t<long int>()
 											);
 		}
 
@@ -950,7 +1095,7 @@ class Mreg{
 			#if VERBOSE
 			printf("Opening %d captures\n", group->size());
 			#endif
-			for(group_t<uint>::iterator n = group->begin(); n != group->end(); ++n)
+			for(group_t<uint>::const_iterator n = group->cbegin(); n != group->end(); ++n)
 				if(!this->data[(*n)+CAPTURES]){
 					this->data[(*n)+CAPTURES] = reinterpret_cast<intptr_t>(
 												new capture_t<long int> {this->added_id}
@@ -967,9 +1112,11 @@ class Mreg{
 			reinterpret_cast<capture_t<long int>*>(this->data[node+CAPTURES])
 							->push_back(this->added_id);
 			#if VERBOSE
-			printf("\tCAPTURE %u : 0x%x\n", node, this->data[node+CAPTURES]);
+			printf("\tCAPTURE START %u : 0x%x\n", node, this->data[node+CAPTURES]);
 			#endif
 		}
+
+		this->contains_captures[this->added_id] = true;
 	}
 
 	inline void end_group(const uint node){
@@ -992,28 +1139,138 @@ class Mreg{
 			#endif
 			for(group_t<uint>::iterator n = group->begin(); n != group->end(); ++n){
 				reinterpret_cast<capture_t<long int>*>(this->data[node+CAPTURES])
-							->push_front(-static_cast<long int>(this->added_id));
+							->push_front(-this->added_id);
 							
 				#if VERBOSE
 				printf("\tCAPTURES %u : 0x%x\n", (*n), this->data[(*n)+CAPTURES]);
 				#endif
 			}
 		}
-		else
+		else{
 			reinterpret_cast<capture_t<long int>*>(this->data[node+CAPTURES])
-							->push_front(-static_cast<long int>(this->added_id));
+							->push_front(-this->added_id);
+			#if VERBOSE
+			printf("\tCAPTURE END %u : 0x%x\n", node, this->data[node+CAPTURES]);
+			#endif
+		}
 
 	}
 
 	void clean(){
 		// Breath, hash and remove 
-		std::hash<std::string> a;
-		return;
+		
+		std::unordered_map<intptr_t, uint> capture_data_start = std::unordered_map<intptr_t, uint>();
+		std::unordered_map<uint, uint> capture_data_space = std::unordered_map<uint, uint>();
+		const size_t max_size = this->data.size();
+	
+		#if VERBOSE
+		printf("\n\n### CLEANING\n");
+		#endif
+
+		uint capture_cell;
+
+		for(uint node = char_length; node != max_size; node += char_length){
+			// If the node has a capture vector
+			// and it is a pointer (gt data.size())
+			if(this->data[node+CAPTURES]){
+				if(this->data[node+CAPTURES] > static_cast<uint>(this->data.size())){
+					// If we have not deleted this ptr yet
+					if(! this->deleted.count(this->data[node+CAPTURES])){
+						capture_t<long int>* captures = reinterpret_cast<capture_t<long int>*>(this->data[node+CAPTURES]);
+						
+						captures->sort();
+						captures->reverse();
+
+						this->deleted.insert(this->data[node+CAPTURES]);
+
+						std::unordered_map<uint, uint>::iterator spaces_iter = capture_data_space.begin();
+
+						for(; spaces_iter != capture_data_space.end(); ++spaces_iter){
+							// Space_left + captures.size + 1 <= char_length
+							if(spaces_iter->second+captures->size() < char_length)
+								break;
+						} 
+
+
+						#if VERBOSE
+						printf("\tNew ptr 0x%X in node %u\n\t Assigned to ", this->data[node+CAPTURES], node);
+						#endif
+
+						if(spaces_iter == capture_data_space.end()){
+							capture_cell = this->data.size();
+							this->new_node();
+							this->nodes_data_captures.insert(capture_cell);
+
+							#if VERBOSE
+							printf("NEW generated ");
+							#endif
+
+
+							// Take note of the size of the vector
+							// we are writing down.
+							capture_data_space[capture_cell] = captures->size()+2;
+
+							// Mark as a node that holds only captures
+							// Start in cell 1 (zero ocupied)
+							this->data[capture_cell] = CAPTURE_NODE;
+							++capture_cell;
+						} else {
+							capture_cell = spaces_iter->first + spaces_iter->second;
+							spaces_iter->second += captures->size()+1;
+						}
+
+						#if VERBOSE
+						printf("node %u\n\t Contains %zu capture nodes\n\t  [", capture_cell, captures->size());
+						#endif
+						
+						capture_data_start[this->data[node+CAPTURES]] = capture_cell;
+						this->data[capture_cell] = captures->size();
+
+						// Take note the new direction assigned
+						this->data[node+CAPTURES] = capture_cell;
+
+						for(long int captured_node : *captures){
+							++capture_cell;
+							this->data[capture_cell] = captured_node;
+							#if VERBOSE
+							printf(" %d[%u]", captured_node, capture_cell);
+							#endif
+						}
+
+						#if VERBOSE
+						printf(" ]\n");
+						#endif
+
+						delete captures;
+					}
+					// If we deleted it, access to the capture cell in the umap
+					else {
+						std::unordered_map<intptr_t, uint>::const_iterator seen_cell = 
+								capture_data_start.find(this->data[node+CAPTURES]);
+
+						if(seen_cell != capture_data_start.cend()){
+							this->data[node+CAPTURES] = seen_cell->second;
+
+							#if VERBOSE
+							printf("\tSeen ptr 0x%X in node %u\n\t Redirected to %u\n", 
+										this->data[node+CAPTURES], node, seen_cell->second);
+							#endif
+						} else {
+							printf("[!]\n[!] ERROR: Missing ptr in %u (0x%x)\n[!]\n\n\n", node, this->data[node+CAPTURES]);
+							this->data[node+CAPTURES] = 0;
+						}
+					}
+				}
+			}
+		}
+		#if VERBOSE
+		printf("### Size %zu -> %zu\n\n", max_size, this->data.size());
+		#endif
 	}
-  
+	
 	std::ostream& store(std::ostream& out_stream){
 		#if VERBOSE
-		printf("Serializing all %zu data pos... ", this->data.size());
+		printf("Serializing all %zu data pos... \n", this->data.size());
 		#endif
 		
 		const size_t data_size = this->data.size();
@@ -1022,7 +1279,7 @@ class Mreg{
 		out_stream.write(reinterpret_cast<char const*>(this->data.data()), data_size*sizeof(intptr_t));
 
 		#if !CLEAN || VERBOSE
-		printf("[#] Data serialized.\n");
+		printf("[#] Data serialized.\n\n");
 		#endif
 
 		return out_stream;
@@ -1030,9 +1287,8 @@ class Mreg{
 
 	std::istream& load(std::istream& in_stream){
 		#if VERBOSE
-		printf("Loading all");
+		printf("Loading all ");
 		#endif
-
 		decltype(this->data.size()) size;
 		in_stream.read(reinterpret_cast<char *>(&size), sizeof(size));
 		
@@ -1047,13 +1303,195 @@ class Mreg{
 		printf("[#] Data deserialized.\n\n");
 		#endif
 
-		this->nodes_captures.reserve(this->data[MAX_LENGTH] * this->data[NUM_ADDED]);
-		this->str_captures.reserve(this->data[MAX_LENGTH] * this->data[NUM_ADDED]);
+		this->nodes_captures.reserve(this->data[MAX_LENGTH]);
+		this->str_captures.reserve(this->data[MAX_LENGTH]);
+		this->str_starts.reserve(this->data[MAX_LENGTH]);
+		this->added_id = this->data[NUM_ADDED];
+
+		this->restore_captures();
 
 		return in_stream;
 	}
 
-	uint match(const char * str){
+	void restore_captures(){
+		this->contains_captures.insert(
+				this->contains_captures.cend(), this->added_id+1, false);
+		const size_t max_size = this->data.size();
+
+		#if VERBOSE
+		printf("Restoring captures:\n");
+
+		std::unordered_set<uint> seen = std::unordered_set<uint>();
+		#endif
+
+		int captured_id;
+
+		for(uint node = char_length; node != max_size; node += char_length){
+			if(this->data[node] == CAPTURE_NODE){
+				#if VERBOSE
+				printf("Node %u is a capture node\n", node);
+				#endif
+
+				++node;
+				while(this->data[node] != 0){
+					//printf("node %u of length: %u\n", node, this->data[node]);
+					for(uint captured = this->data[node++]; captured != 0; --captured, ++node){
+						//printf("%u %u %u\n", node, this->data[node], captured);
+						captured_id = abs(static_cast<int>(this->data[node]));
+						this->contains_captures[captured_id] = true;
+
+						#if VERBOSE
+						if(! seen.count(captured_id)){
+							printf("Detected captures in id: %u\n", captured_id);
+
+							seen.insert(captured_id);
+						}
+						#endif
+					}
+				}
+
+				#if VERBOSE
+				printf("Return to initial node cell from %u -> ", node);
+				#endif
+				// Return to node % char_length = 0
+				node -= node % char_length;
+				#if VERBOSE
+				printf("%u\n", node);
+				#endif
+			}
+		}
+
+		#if VERBOSE
+		printf("\n");
+		#endif
+		#if !CLEAN || VERBOSE
+		printf("Ids with captures are:\n ");
+		
+		for(uint capture_id = 1; capture_id != this->contains_captures.size(); ++capture_id)
+			if(this->contains_captures[capture_id])
+				printf("%u ", capture_id);
+
+		printf("\n\n");
+		#endif
+	}
+
+	inline uint count_sorted(uint node, const uint value)
+		__attribute__ ((const))
+		#if !PROFILE
+		__attribute__ ((always_inline))
+		#endif
+		__attribute__ ((hot))
+	{
+		#if VERBOSE
+		printf("CS[%u,%d|%u]:", node, this->data[node], value);
+		#endif
+		const uint end = node + this->data[node] + 1;
+
+		++node;
+		if(this->data[node] > value){
+			#if VERBOSE
+			printf(" - None\n");
+			#endif
+			return 0;
+		}
+		++node;
+
+		uint result = 0;
+		while(this->data[node] < value){
+			if(node == end){
+				#if VERBOSE
+				printf(" - None\n");
+				#endif
+
+				return 0;
+			}
+
+			#if VERBOSE
+			printf(" %u", this->data[node]);
+			#endif
+			++node;
+		}
+
+		while(node != end && this->data[node] == value){
+			++result;
+			#if VERBOSE
+			printf(" N%u", node);
+			#endif
+			++node;
+		}
+			
+		#if VERBOSE
+		printf("\n", node);
+		#endif
+		return result;
+	}
+
+	inline uint count_sorted_backw(uint node, const uint value)
+		__attribute__ ((const))
+		#if !PROFILE
+		__attribute__ ((always_inline))
+		#endif
+		__attribute__ ((hot))
+	{
+		#if VERBOSE
+		printf("CSB[%u,%d|%u]:", node, this->data[node], value);
+		#endif
+		const uint end = node;
+		const uint max = this->added_id + 1;
+		node += this->data[node];
+
+		#if VERBOSE
+		printf(" %u", this->data[node]);
+		
+		#endif
+
+		if(this->data[node] < value || this->data[node] > max){
+			#if VERBOSE
+			printf(" - None\n");
+			#endif
+			return 0;
+		}
+
+		uint result = 0;
+		while(this->data[node] < max && this->data[node] > value){
+			if(node == end){
+				#if VERBOSE
+				printf(" - None\n");
+				#endif
+
+				return 0;
+			}
+
+			#if VERBOSE
+			printf(" %u", this->data[node]);
+			#endif
+			--node;
+		}
+
+		while(node != end && this->data[node] == value){
+			++result;
+			#if VERBOSE
+			printf(" N%u", node);
+			#endif
+			--node;
+		}
+
+		#if VERBOSE
+		printf("\n");
+		#endif
+
+		return result;
+	}
+
+	uint match(const char * str)
+		# if !PROFILE
+		__attribute__ ((always_inline))
+		__attribute__ ((flatten))
+		#endif
+		__attribute__ ((hot))
+		// Should it have a const attribute?
+		
+	{
 		// In the future, it could be added a find() 
 		// to improve efficiency in the not-so-rare case of
 		// any of . and + or * followed by a unique char
@@ -1074,34 +1512,55 @@ class Mreg{
 		// node+start_capture and node+end_capture. 
 		uint mreg = char_length;
 
-		if(this->data[mreg+CAPTURES]){
-			#if VERBOSE
-			printf("Detected captures in node %u", mreg);
-			#endif
-			nodes_captures.push_back(mreg);
-			str_captures.push_back(str);
-		}
+		this->nodes_captures.clear();
+		this->str_captures.clear();
 
 		#if VERBOSE
-			printf("mat0 %c, 0x%x\n", *str, this->data[mreg+*str+char_offset]);
+		printf("match start %c, 0x%x\n", *str, this->data[mreg+*str+char_offset]);
 
-			uint last_id = mreg;
+		uint last_id = mreg;
+
+		std::list<char> restart_str = std::list<char>();
 		#endif
+
+		// Profiler: this is match()
+
+		// Not necessary, but tell the compiler that data
+		// is important and must be cached from that address
+		__builtin_prefetch(&this->data[char_length+CAPTURES]);
+
+		#if !PLAIN_MATCH
+		// If contains any captures in the initial node
+		if(this->data[mreg+CAPTURES]){
+			#if VERBOSE
+			printf("Detected captures in node %u [%X]\n", mreg, this->data[mreg+CAPTURES]);
+			
+			restart_str.push_back(*str);
+			#endif	
+			this->nodes_captures.push_back(this->data[mreg+CAPTURES]);
+			this->str_captures.push_back(str);
+		}
+		#endif
+
 		while(*str && (mreg = this->data[mreg+*str+char_offset])){
 			#if VERBOSE
-			printf("mat %c %i\n", *str, *str);
+			printf("match %c (%i)\n", *str, *str);
 			
 			printf("%u -> %u\n", last_id, mreg);
 			last_id = mreg;
 			#endif
 			
+			#if !PLAIN_MATCH
 			if(this->data[mreg+CAPTURES]){
 				#if VERBOSE
-				printf("Detected captures in node %u", mreg);
-				#endif	
-				nodes_captures.push_back(mreg);
-				str_captures.push_back(str);
+				printf("Detected captures in node %u [%u]\n", mreg, this->data[mreg+CAPTURES]);
+			
+				restart_str.push_back(*str);
+				#endif
+				this->nodes_captures.push_back(this->data[mreg+CAPTURES]);
+				this->str_captures.push_back(str);
 			}
+			#endif
 
 			++str;
 		}
@@ -1114,63 +1573,116 @@ class Mreg{
 		#endif
 
 		if((!*str) && final){ [[likely]];
-			#if VERBOSE
-			//for
+			#if !PLAIN_MATCH
+			if(! this->contains_captures[final]){
+				#if VERBOSE
+				printf("Id %u does NOT contain captures.\n", final);
+				#endif
 
-			std::vector<const char*>::const_iterator cap_groups = this->match_groups[final].begin();
-			const std::vector<const char*>::const_iterator cap_groups_end = this->match_groups[final].end();
-			
-			if(cap_groups != cap_groups_end){
-				std::string buffer = std::string();
-				buffer.reserve(128);
-				// Max capture group can only be of size string
-				int cap_id; char* sub_str;
-				
-				std::stack<const char*> starts = std::stack<const char*>();
-
-				std::unordered_set<int> seen = std::unordered_set<int>();
-
-				printf("  Captured groups:\n");
-				for(std::vector<bool>::const_iterator cap_endings = this->match_endings[final].begin();
-							cap_groups != cap_groups_end; ++cap_groups, ++cap_endings){
-					//if(!seen.find())
-					
-					// if end of capture
-					if(*cap_endings && !starts.empty()){
-						buffer.clear();
-						const int subs_end = std::distance(starts.top(), *cap_groups);
-
-						// It is not necessary right now, could be added as is,
-						// but in the future it will, so I do it anyways
-						buffer.append(starts.top(), subs_end);
-
-						printf("    %s\n", buffer.c_str());
-						starts.pop();
-
-					// if start of capture
-					} else 
-						starts.push(*cap_groups);
-				}
-				
-				// Get the substring of all missing capture groups from the ptr
-				// they were captured from to the end of the string	
-				for(int stack_empty = starts.size(); stack_empty > 0; --stack_empty){
-					buffer.clear();
-					// Substring until the end
-					const char* subs_start = starts.top();
-					const int subs_end = std::distance(subs_start, str);
-
-					// It is not necessary right now, could be added as is,
-					// but in the future it will, so I do it anyways
-					buffer.append(starts.top(), subs_end);
-
-					printf("    %s\n", buffer.c_str());
-					starts.pop();
-				}
-				printf("\n");
+				return final;
 			}
+
+			std::vector<intptr_t>::const_iterator nodes_iter = this->nodes_captures.cbegin();
+			const std::vector<intptr_t>::const_iterator nodes_end = this->nodes_captures.cend();
+			
+			std::vector<const char*>::const_iterator str_iter = this->str_captures.cbegin();
+			
+			#if VERBOSE
+			std::list<char>::const_iterator print_iter = restart_str.cbegin();
 			#endif
 
+			{
+
+			uint starting_captures = 0;
+			// The first node with should only have starting captures, 
+			// find the first containing final
+			for(; nodes_iter != nodes_end && !starting_captures; ++nodes_iter, ++str_iter){
+				// Search in reverse because starting groups are positive
+				starting_captures = this->count_sorted_backw(*nodes_iter, final);
+				#if VERBOSE
+				printf("SC: %u\n", starting_captures);
+				
+				++print_iter;
+				#endif
+			}
+
+			// Should be removed. Either contains_captures is wrong, or
+			// checking for starting captures is somehow wrong.
+			if(! starting_captures){
+				#if VERBOSE
+				printf("[-]Contains captures was false, but we did not find any captures\n");
+				#endif
+
+				return 0;
+			}
+			#if VERBOSE
+			printf(" Start capture in char: %c\n", *print_iter);
+			++print_iter;
+			#endif
+
+			uint starts = 0;
+			for(; starting_captures; --starting_captures, ++starts)
+				this->str_starts.push_back(*str_iter);
+			
+			std::string buffer = std::string();
+			const char* group_start;
+			char *subStr;
+
+			uint new_groups, char_dist;
+
+			// We can do while because we have not returned,
+			// so, at least once we have to search for starting/final nodes
+			while(nodes_iter != nodes_end){
+				for(new_groups = this->count_sorted(*nodes_iter, -final); 
+							new_groups; --new_groups){
+					group_start = this->str_starts.back();
+					this->str_starts.pop_back();
+					
+					subStr = static_cast<char*>(
+						calloc(std::distance(group_start, *str_iter), sizeof(char))); 
+					memcpy(subStr, group_start, std::distance(group_start, *str_iter));
+
+					#if VERBOSE
+					printf(" End capture in char: %c\n", *print_iter);
+
+					printf("----%s-\n", subStr);
+					#endif
+				}
+
+				for(new_groups = this->count_sorted_backw(*nodes_iter, final); new_groups; --new_groups){
+					this->str_starts.push_back(*str_iter);
+					
+					#if VERBOSE
+					printf(" Start capture in char: %c\n", *print_iter);
+					#endif
+				}
+				
+				++str_iter;
+				++nodes_iter;
+				#if VERBOSE
+				++print_iter;
+				#endif
+			}
+
+			#if VERBOSE
+			if(this->str_starts.size())
+				printf("# End of the string\n");
+			#endif
+
+			for(const char* last_str : this->str_starts){
+				subStr = static_cast<char*>(
+						calloc(std::distance(last_str, str), sizeof(char))); 
+				memcpy(subStr, last_str, std::distance(last_str, str));
+
+				#if VERBOSE
+				printf("----%s-\n", subStr);
+				#endif
+			}
+
+			this->str_starts.clear();
+	
+			}
+			#endif
 			return final;
 		}
 
@@ -1197,7 +1709,9 @@ int main(int argc, char* argv[])
 						"[b-z1b]@", "\\..\\.", "a\\db",
 						"ha{4}h", "l(o{2,})p", "limit{2,5}",
 						"aleluy(a*)", "numeros?", "chi(c)(o|a|e)(s+)",
-						"while\\s*\\(?.*:"
+						"(Hola, )?(mi )?amigo!", "muy (buenas)?",
+						"(muchas )*gracias", "pues( si)*",
+						"tu( sabes)+", "(no, )+mola"
 						};
 	# endif
 
@@ -1216,26 +1730,46 @@ int main(int argc, char* argv[])
 						"1234", "aleluy", "aleluyaaa", "alelu",
 						"numero", "numeros", "numer", "numeross",
 						"chicosssss", "chicas", "chices", "chicus",
-						"while   var1  >  not 10  and var2 == var3   or    3<not 40    :"
+						"amigo!", "mi amigo!", "Hola, amigo!",
+						"Hola, mi amigo!", "Hola,mi amigo!",
+						"muy ", "muy buenas", "muybuenas",
+						"buenas", "gracias", "muchas gracias",
+						"muchas muchas muchas gracias",
+						"pues", "pues si", "pues si si si",
+						"tu sabes", "tu sabes sabes sabes", "tu",
+						"no, mola", "no, no, no, mola", "mola",
+						"muchas   gracias", "pues siii",
+						"tu sabesssss", "no,    mola", 
+						"muchasgracias", "no,mola"
 						};
 
 	// Ids start by 1 from the add array, since id=0 means no match
 	std::vector<uint> id {
 						2, 4, 0, 3, 2,
-						1, 11, 1, 7, 0, 0, 
-						6, 8, 8, 0, 9, 
+						1, 11, 1, 7, 0, 
+						0, 6, 8, 8, 0, 9, 
 						9, 0, 0, 10, 10, 
 						12, 0, 0, 13, 13,
 						0, 0, 14, 14, 0,
 						6, 15, 15, 0, 16,
 						16, 0, 0, 17, 17,
-						17, 0, 0
+						17, 0, 18, 18, 18,
+						18, 0, 19, 19, 0, 
+						0, 20, 20, 20, 21,
+						21, 21, 22, 22, 0,
+						22, 22, 0, 0, 0,
+						0, 0, 0, 0
 						};
 	#endif
 
 	#if VERBOSE
-		printf("#### Start ####\n");
+	std::unordered_set<uint> show {
+		13
+	};
+
+	printf("#### Start ####\n");
 	#endif
+
 	typedef std::chrono::high_resolution_clock Clock;
 	std::chrono::_V2::system_clock::time_point load_data_start, load_data_end,
 											store_data_start, store_data_end;
@@ -1256,6 +1790,8 @@ int main(int argc, char* argv[])
 	}
     auto add_regex_end = Clock::now();
 
+	r.delete_pointers();
+
 	#if !CLEAN
 	// Print after timing for performace reasons.
 	// Done in reverse to simplify correct added_id print
@@ -1267,6 +1803,8 @@ int main(int argc, char* argv[])
 	printf("\n\n[?] End of append.\nResult (starting node):\n%s\nResult (size): %u\n\n\nMatching:\n", 
 				r.c_str(), r.data.size());
 	#endif
+
+	r.clean();
 
 	#if STORE
 	{
@@ -1292,18 +1830,22 @@ int main(int argc, char* argv[])
 	r.load(file);
 	load_data_end = Clock::now();
 
-	// FOR PROFILING ONLY
-	r.match(match[0]);
-	r.match(match[0]);
-	// FOR PROFILING ONLY
 	}
 	#endif
 
 	#if MATCH
+
+	#if !VERBOSE
+	// So that it appears in profiling:
+	for(const char* match_str : match){
+		r.match(match_str);
+	}
+	#endif
+
 	std::vector<uint> match_ids {};
 	match_ids.reserve(match.size());
 
-	int correct = 0;
+	uint correct = 0, missed = 0, missmatched = 0;
 	uint found;
 
 	const uint match_size = static_cast<uint>(match.size());
@@ -1314,18 +1856,28 @@ int main(int argc, char* argv[])
 		#if VERBOSE
 			found = r.match(match_str);
 
+			if(show.size() && show.count(found))
+				printf("\n\n###\n");
+
 			if(found){
 				printf("\t [%c] Match of \"%s\" [ match id = %u ]\n",
 									(id[check]==found)?'+':'-',match_str,found);
 				if(id[check]==found)
 					++correct;
+				else
+					++missmatched;
 			}
 			else{
 				printf("\t [%c] Not match of \"%s\"\n",
 									(id[check]==0)?'+':'-', match_str);
 				if(id[check]==0)
 					++correct;
+				else
+					++missed;
 			}
+
+			if(show.size() && show.count(found))
+				printf("\n###\n\n");
 
 			++check;
 		#else
@@ -1346,11 +1898,15 @@ int main(int argc, char* argv[])
 								(id[check]==found)?'+':'-',match[check],found);
 			if(id[check]==found)
 				++correct;
+			else
+				++missmatched;
 		}else{
 			printf("\t [%c] Not match of \"%s\"\n",
 								(id[check]==0)?'+':'-', match[check]);
 			if(id[check]==0)
 				++correct;
+			else
+				++missed;
 		}
 	}
 	#endif
@@ -1360,6 +1916,10 @@ int main(int argc, char* argv[])
 
 	#if MATCH
 	printf(" (%d/%zu) of correct matches.\n", correct, match.size());
+	if(missmatched)
+		printf("    [%d of which, missmatched]\n", missmatched);
+	if(missed)
+		printf("    [%d of which, missed matches]\n", missed);
 	printf("  %.1f%% of correct matches.\n\n", static_cast<float>(correct*100)/match.size());
 	#endif
 
@@ -1396,4 +1956,6 @@ int main(int argc, char* argv[])
 
 	printf("#################\n");
 	#endif
+
+	return 0;
 }
