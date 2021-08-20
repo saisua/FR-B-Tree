@@ -4,3 +4,6 @@ mreg
 *.tree
 
 .vscode/*
+
+full_regex.cpp
+cllist.cpp

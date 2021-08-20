@@ -5,7 +5,7 @@ rm ./callgrind.out.* && \
 rm ./cachegrind.out.* && \
 
 #-no-pie -O0 -fno-builtin
-./compile.sh -lprofiler && \
+./compile.sh -lprofiler -DFRB_PROFILE -pg -g3 && \
 
 
 valgrind --tool=cachegrind --read-inline-info=yes ./mreg;
@@ -13,7 +13,7 @@ valgrind --tool=cachegrind --read-inline-info=yes ./mreg;
 # --toggle-collect=match
 valgrind --tool=callgrind --read-inline-info=yes \
     --dump-instr=yes --collect-jumps=yes -v \
-    --num-callers=500 --dsymutil=yes --simulate-cache=yes \
+    --num-callers=500 --dsymutil=yes --simulate-cache=no \
      ./mreg;
 
 sleep 1s && \
