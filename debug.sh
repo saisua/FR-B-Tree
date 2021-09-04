@@ -1,2 +1,2 @@
-./compile.sh && \
+./compile.sh $@ && \
 gdb ./mreg core
