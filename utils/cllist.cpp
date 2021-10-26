@@ -186,6 +186,19 @@ class C_linked_list {
             this->next_array_index = next_index;
         }
 
+        inline void set_current_collection(std::vector<T>::iterator & array, uint index, 
+                                        std::vector<T>::iterator & next_array, uint next_index){
+            ++this->collections;
+
+            this->actual_array = array;
+            this->actual_array_index = index;  
+
+            this->actual_space = *array; 
+
+            this->next_array = next_array;
+            this->next_array_index = next_index;
+        }
+
         inline T* reserve_group(T& group_index) {
             // If already exists, check if it is the last in
             // array_starts. If it is not, move all starts one
@@ -355,7 +368,7 @@ class C_linked_list {
             }
 
             typename
-            std::vector<T*>::iterator last = this->_array_start.end()-new_collections;
+            std::vector<T*>::iterator last = this->_array_starts.end()-new_collections;
 
             if(set_actual) 
                 this->set_current_collection(last, 
