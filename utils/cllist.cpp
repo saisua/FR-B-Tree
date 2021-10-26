@@ -186,8 +186,8 @@ class C_linked_list {
             this->next_array_index = next_index;
         }
 
-        inline void set_current_collection(std::vector<T>::iterator & array, uint index, 
-                                        std::vector<T>::iterator & next_array, uint next_index){
+        inline void set_current_collection(std::vector<T*>::iterator & array, long unsigned int index, 
+                                        std::vector<T*>::iterator & next_array, long unsigned int next_index){
             ++this->collections;
 
             this->actual_array = array;
@@ -373,7 +373,7 @@ class C_linked_list {
             if(set_actual) 
                 this->set_current_collection(last, 
                                             this->_size_coll - new_collections + 1,
-                                            last + 1,
+                                            last,
                                             this->_size_coll - new_collections + 2);
         }
 
