@@ -1,0 +1,1 @@
+g++ cllist.cpp -o cllist_test -O3 --fast-math -march=native -std=c++20
